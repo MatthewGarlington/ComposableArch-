@@ -35,14 +35,17 @@ extension Publisher where Failure == Never {
         public func send(_ action: Action) {
             let effects = self.reducer(&self.value, action)
             effects.forEach { effect in
-                var effectCancellable: AnyCancellable!
+                var effectCancellable: AnyCancellable?
                 effectCancellable = effect.sink(
                     receiveCompletion: { [weak self] _ in
+                        guard let effectCancellable = effectCancellable else { return }
                         self?.effectCancellables.remove(effectCancellable)
                     },
                     receiveValue: self.send
                 )
-                self.effectCancellables.insert(effectCancellable)
+                if let effectCancellable = effectCancellable  {
+                    self.effectCancellables.insert(effectCancellable)
+                }
             }
         }
         
