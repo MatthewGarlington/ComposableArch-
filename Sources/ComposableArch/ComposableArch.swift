@@ -2,12 +2,30 @@ import Combine
 import SwiftUI
 
 
+public struct Effect<Output>: Publisher {
+    public typealias Failure = Never
+    
+    let publisher: AnyPublisher<Output, Failure>
+    
+    public func receive<S>(subscriber: S) where S : Subscriber, Never == S.Failure, Output == S.Input {
+        self.publisher.receive(subscriber: subscriber)
+    }
+}
+
+extension Publisher where Failure == Never {
+    public func eraseToEffect() -> Effect<Output> {
+        return Effect(publisher: self.eraseToAnyPublisher())
+    }
+}
+
+
     public typealias Reducer<Value, Action> = (inout Value, Action) -> [Effect<Action>]
     
     public final class Store<Value, Action>: ObservableObject {
         private let reducer: Reducer<Value, Action>
         @Published public private(set) var value: Value
-        private var cancellable: Cancellable?
+        private var viewCancellable: Cancellable?
+        private var effectCancellables: Set<AnyCancellable> = []
         
         public init(initialValue: Value, reducer: @escaping Reducer<Value, Action>) {
             self.reducer = reducer
@@ -17,7 +35,14 @@ import SwiftUI
         public func send(_ action: Action) {
             let effects = self.reducer(&self.value, action)
             effects.forEach { effect in
-                effect.run(send)
+                var effectCancellable: AnyCancellable!
+                effectCancellable = effect.sink(
+                    receiveCompletion: { [weak self] _ in
+                        self?.effectCancellables.remove(effectCancellable)
+                    },
+                    receiveValue: self.send
+                )
+                self.effectCancellables.insert(effectCancellable)
             }
         }
         
@@ -33,7 +58,7 @@ import SwiftUI
                     return []
                 }
             )
-            localStore.cancellable = self.$value.sink { [weak localStore] newValue in
+            localStore.viewCancellable = self.$value.sink { [weak localStore] newValue in
                 localStore?.value = toLocalValue(newValue)
             }
             return localStore
@@ -67,14 +92,12 @@ import SwiftUI
             guard let localAction = globalAction[keyPath: action] else { return [] }
             let localEffects = reducer(&globalValue[keyPath: value], localAction)
             return localEffects.map { localEffect in
-                Effect { callback in
-                    // guard let localAction = localEffect() else { return nil }
-                    localEffect.run { location in
-                        var globalAction = globalAction
-                        globalAction[keyPath: action] = localAction
-                        callback(globalAction)
-                    }
+                localEffect.map { localAction -> GlobalAction in
+                    var globalAction = globalAction
+                    globalAction[keyPath: action] = localAction
+                    return globalAction
                 }
+                .eraseToEffect()
             }
         }
     }
@@ -85,7 +108,7 @@ import SwiftUI
         return { value, action in
             let effects = reducer(&value, action)
             let newValue = value
-            return [Effect { _ in
+            return [.fireAndForget {
                 print("Action: \(action)")
                 print("Value:")
                 dump(newValue)
@@ -93,3 +116,12 @@ import SwiftUI
             }] + effects
         }
     }
+
+extension Effect {
+    public static func fireAndForget(work: @escaping () -> Void) -> Effect {
+        return Deferred { () -> Empty<Output, Never> in
+            work()
+            return Empty(completeImmediately: true)
+        }.eraseToEffect()
+    }
+}
